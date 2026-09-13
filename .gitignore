@@ -6,4 +6,6 @@
 data/drafts/*.json
 data/published/*.json
 *.py[cod]
+*.egg-info/
+node_modules/
 .DS_Store
