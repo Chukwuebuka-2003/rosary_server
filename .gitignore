@@ -1,0 +1,9 @@
+.venv/
+.pytest_cache/
+**/__pycache__/
+.env*
+!.env.example
+data/drafts/*.json
+data/published/*.json
+*.py[cod]
+.DS_Store
