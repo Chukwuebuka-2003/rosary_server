@@ -6,7 +6,7 @@ import json
 import httpx
 from fastapi.testclient import TestClient
 
-from app.ai import AiService, InstallationRateLimiter
+from app.ai import AiService, InstallationRateLimiter, grounding_issues
 from app.llm import LlmSettings, create_llm_provider
 from app.main import create_app
 from app.retrieval import ExaRetriever, ExaSettings, RetrievedSource
@@ -185,8 +185,12 @@ def test_ai_rate_limits_by_installation(tmp_path) -> None:
     asyncio.run(async_client.aclose())
 
 
-def test_ai_discards_unknown_source_markers(tmp_path) -> None:
+def test_ai_blocks_unknown_source_markers_after_repair_attempt(tmp_path) -> None:
+    calls = 0
+
     def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
         return httpx.Response(
             200,
             json={
@@ -214,10 +218,183 @@ def test_ai_discards_unknown_source_markers(tmp_path) -> None:
             json=request_payload(),
         )
 
-    assert response.status_code == 200
-    assert response.json()["citations"] == []
-    assert response.json()["limitations"]
+    assert calls == 2
+    assert response.status_code == 502
+    assert response.json()["error"] == "ungrounded_ai_response"
     asyncio.run(async_client.aclose())
+
+
+def test_ai_repairs_uncited_catechism_claim(tmp_path) -> None:
+    calls = 0
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if calls == 1:
+            text = 'The Catechism says this is required (CCC 1234).'
+            response_id = "draft"
+        else:
+            assert "GROUNDING FAILURES" in payload["input"]
+            assert "REJECTED DRAFT" in payload["input"]
+            text = "Jesus reveals God's joy in seeking the lost [S1]."
+            response_id = "repaired"
+        return httpx.Response(
+            200,
+            json={
+                "id": response_id,
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": text}],
+                    }
+                ],
+            },
+        )
+
+    app, async_client = configured_app(tmp_path, upstream, retriever=FixedRetriever())
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/ai/ask",
+            headers={"X-Installation-Id": INSTALLATION_ID},
+            json=request_payload(),
+        )
+
+    assert calls == 2
+    assert response.status_code == 200
+    assert response.json()["responseId"] == "repaired"
+    assert response.json()["citations"][0]["url"] == "https://www.vatican.va/example"
+    asyncio.run(async_client.aclose())
+
+
+def test_ai_blocks_uncited_quotation_after_repair_attempt(tmp_path) -> None:
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "quoted",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": 'Jesus said, "This quotation has no supplied source marker."',
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+    app, async_client = configured_app(tmp_path, upstream, retriever=FixedRetriever())
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/ai/ask",
+            headers={"X-Installation-Id": INSTALLATION_ID},
+            json=request_payload(),
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"] == "ungrounded_ai_response"
+    asyncio.run(async_client.aclose())
+
+
+def test_ai_blocks_document_number_not_present_in_cited_source(tmp_path) -> None:
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "unsupported-document-number",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "The Catechism teaches this in CCC 1234 [S1].",
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+    app, async_client = configured_app(tmp_path, upstream, retriever=FixedRetriever())
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/ai/ask",
+            headers={"X-Installation-Id": INSTALLATION_ID},
+            json=request_payload(),
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"] == "ungrounded_ai_response"
+    asyncio.run(async_client.aclose())
+
+
+def test_ai_blocks_low_citation_coverage_after_repair_attempt(tmp_path) -> None:
+    answer = "\n\n".join(
+        (
+            "Jesus tells a parable that reveals the Father's mercy toward sinners [S1].",
+            "The lost sheep represents every person who has wandered far from God.",
+            "The shepherd's search demonstrates that repentance is always unnecessary.",
+            "This teaching establishes a universal rule for every pastoral situation.",
+        )
+    )
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "low-coverage",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": answer}],
+                    }
+                ],
+            },
+        )
+
+    app, async_client = configured_app(tmp_path, upstream, retriever=FixedRetriever())
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/ai/ask",
+            headers={"X-Installation-Id": INSTALLATION_ID},
+            json=request_payload(),
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"] == "ungrounded_ai_response"
+    asyncio.run(async_client.aclose())
+
+
+def test_grounding_accepts_exact_catechism_reference_from_matching_source() -> None:
+    source = RetrievedSource(
+        source_id="S1",
+        title="Catechism of the Catholic Church",
+        url="https://www.vatican.va/archive/ENG0015/example",
+        excerpt="Paragraph 613 teaches that Christ's death is the unique sacrifice.",
+    )
+    answer = "The Catechism describes Christ's death as the unique sacrifice (CCC 613) [S1]."
+
+    assert grounding_issues(answer, (source,)) == []
+
+
+def test_grounding_rejects_quote_absent_from_cited_excerpt() -> None:
+    source = RetrievedSource(
+        source_id="S1",
+        title="The Holy See",
+        url="https://www.vatican.va/example",
+        excerpt="The shepherd rejoices when he finds the lost sheep.",
+    )
+    answer = 'Jesus said, "A quotation invented by the language model" [S1].'
+
+    assert "A quotation is not present in the cited source excerpt." in grounding_issues(
+        answer,
+        (source,),
+    )
 
 
 def test_chat_completions_adapter_is_swappable_without_android_changes(tmp_path) -> None:

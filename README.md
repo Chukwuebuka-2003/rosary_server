@@ -52,15 +52,28 @@ Adding a native LLM provider later requires one adapter implementing
 `LanguageModelProvider`; the Catholic prompts, validation, rate limits, FastAPI
 route, Exa retrieval, and Android app do not change.
 
+All LLM instructions, retrieval-query wording, context blocks, source blocks,
+and repair templates live in `app/prompts.yaml`. The file has an explicit schema
+version and is validated when the application imports it; a missing, empty, or
+unsupported prompt configuration stops startup instead of silently changing AI
+behaviour. `prompts.yaml` is included as Python package data, so it is available
+in editable installs and built distributions.
+
 Exa search is configured independently with `EXA_API_KEY`, optional
 `EXA_BASE_URL`, and optional `EXA_NUM_RESULTS` (1–10). FastAPI sends the current
 question and displayed liturgical context to Exa, restricts results to
 `vatican.va` and `usccb.org`, requests bounded highlights, and rejects returned
 URLs outside that allowlist. Retrieved excerpts receive stable source IDs such
 as `[S1]`; only IDs actually referenced in the LLM answer become clickable app
-citations. If Exa returns no evidence or the model cites no supplied source, the
-answer is explicitly labelled unverified. `GET /health/ai` reports the active
-LLM adapter and search provider without revealing secrets.
+citations. Generated answers pass a deterministic grounding check before they
+are returned. The check rejects unknown source IDs, uncited quotations,
+Catechism or Canon Law references that do not point to a matching retrieved
+document, and answers whose substantive paragraphs have less than 75% citation
+coverage. A failed draft receives one constrained rewrite attempt; a second
+failure returns `ungrounded_ai_response` instead of exposing the draft. If Exa
+returns no evidence or the model cites no supplied source, the answer is
+explicitly labelled unverified. `GET /health/ai` reports the active LLM adapter
+and search provider without revealing secrets.
 
 The included rate limiter is per FastAPI process. Before running multiple API
 workers or exposing a public beta, add a shared Redis/edge rate limiter and set
