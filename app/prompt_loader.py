@@ -28,6 +28,8 @@ class PromptTemplates:
     question: str
     repair_issue: str
     repair_input: str
+    grounding_fallback_answer: str
+    grounding_fallback_limitation: str
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,16 @@ def load_prompt_catalog(path: Path | None = None) -> PromptCatalog:
             question=require_prompt(templates, "question", "templates.question"),
             repair_issue=require_prompt(templates, "repair_issue", "templates.repair_issue"),
             repair_input=require_prompt(templates, "repair_input", "templates.repair_input"),
+            grounding_fallback_answer=require_prompt(
+                templates,
+                "grounding_fallback_answer",
+                "templates.grounding_fallback_answer",
+            ),
+            grounding_fallback_limitation=require_prompt(
+                templates,
+                "grounding_fallback_limitation",
+                "templates.grounding_fallback_limitation",
+            ),
         ),
     )
 

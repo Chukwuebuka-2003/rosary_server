@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict, deque
 import json
+import logging
 import os
 import re
 from threading import Lock
@@ -22,6 +23,9 @@ INSTALLATION_ID_PATTERN = re.compile(
 )
 ALLOWED_SOURCE_DOMAINS = ("vatican.va", "usccb.org")
 SOURCE_MARKER_PATTERN = re.compile(r"\[(S[1-9][0-9]*)\]")
+SOURCE_MARKER_GROUP_PATTERN = re.compile(
+    r"[\[【]\s*(S[1-9][0-9]*(?:\s*[,;]\s*S[1-9][0-9]*)*)\s*[\]】]"
+)
 QUOTATION_PATTERN = re.compile(r"(?:[\"“][^\"”\n]{20,}[\"”])")
 REFERENCE_RULES = (
     (
@@ -39,6 +43,7 @@ REFERENCE_RULES = (
     ),
 )
 CITATION_COVERAGE_THRESHOLD = 0.75
+LOGGER = logging.getLogger(__name__)
 
 
 class StrictModel(BaseModel):
@@ -166,6 +171,7 @@ class AiService:
                 max_output_tokens=700,
             )
         )
+        result = canonicalize_result_markers(result)
         issues = grounding_issues(result.text, sources)
         if issues:
             result = await self._generate(
@@ -178,12 +184,23 @@ class AiService:
                     max_output_tokens=700,
                 )
             )
+            result = canonicalize_result_markers(result)
             issues = grounding_issues(result.text, sources)
         if issues:
-            raise AiServiceError(
-                "ungrounded_ai_response",
-                "The explanation could not be verified against its sources. Please try again.",
-                502,
+            # A rejected draft must never reach the client. Grounding failure is a
+            # supported product outcome, though, rather than an upstream outage.
+            # Return a deterministic, claim-free limitation so the app can recover
+            # without presenting generated text as verified Catholic teaching.
+            LOGGER.warning(
+                "AI answer failed grounding after repair; response_id=%s issues=%s",
+                result.response_id,
+                issues,
+            )
+            return AiAnswer(
+                answer=PROMPTS.templates.grounding_fallback_answer,
+                citations=[],
+                limitations=[PROMPTS.templates.grounding_fallback_limitation],
+                responseId=result.response_id,
             )
 
         citations = citations_from_answer(result.text, sources)
@@ -347,6 +364,17 @@ def grounding_issues(answer: str, sources: tuple[RetrievedSource, ...]) -> list[
                 )
 
     return list(dict.fromkeys(issues))
+
+
+def canonicalize_result_markers(result: LlmResult) -> LlmResult:
+    """Normalize equivalent LLM citation syntax before strict source validation."""
+
+    def replace_group(match: re.Match[str]) -> str:
+        source_ids = re.findall(r"S[1-9][0-9]*", match.group(1))
+        return " ".join(f"[{source_id}]" for source_id in source_ids)
+
+    normalized = SOURCE_MARKER_GROUP_PATTERN.sub(replace_group, result.text)
+    return LlmResult(response_id=result.response_id, text=normalized)
 
 
 def valid_markers_in(paragraph: str, source_by_id: dict[str, RetrievedSource]) -> set[str]:

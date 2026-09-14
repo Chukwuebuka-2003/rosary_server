@@ -70,7 +70,8 @@ are returned. The check rejects unknown source IDs, uncited quotations,
 Catechism or Canon Law references that do not point to a matching retrieved
 document, and answers whose substantive paragraphs have less than 75% citation
 coverage. A failed draft receives one constrained rewrite attempt; a second
-failure returns `ungrounded_ai_response` instead of exposing the draft. If Exa
+failure returns a deterministic limitation with no generated claims instead of
+exposing the rejected draft. If Exa
 returns no evidence or the model cites no supplied source, the answer is
 explicitly labelled unverified. `GET /health/ai` reports the active LLM adapter
 and search provider without revealing secrets.

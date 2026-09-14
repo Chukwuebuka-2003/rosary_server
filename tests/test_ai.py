@@ -6,8 +6,14 @@ import json
 import httpx
 from fastapi.testclient import TestClient
 
-from app.ai import AiService, InstallationRateLimiter, grounding_issues
+from app.ai import (
+    AiService,
+    InstallationRateLimiter,
+    canonicalize_result_markers,
+    grounding_issues,
+)
 from app.llm import LlmSettings, create_llm_provider
+from app.llm import LlmResult
 from app.main import create_app
 from app.retrieval import ExaRetriever, ExaSettings, RetrievedSource
 
@@ -185,7 +191,7 @@ def test_ai_rate_limits_by_installation(tmp_path) -> None:
     asyncio.run(async_client.aclose())
 
 
-def test_ai_blocks_unknown_source_markers_after_repair_attempt(tmp_path) -> None:
+def test_ai_replaces_unknown_source_markers_with_safe_fallback(tmp_path) -> None:
     calls = 0
 
     def upstream(_request: httpx.Request) -> httpx.Response:
@@ -219,8 +225,7 @@ def test_ai_blocks_unknown_source_markers_after_repair_attempt(tmp_path) -> None
         )
 
     assert calls == 2
-    assert response.status_code == 502
-    assert response.json()["error"] == "ungrounded_ai_response"
+    assert_safe_grounding_fallback(response)
     asyncio.run(async_client.aclose())
 
 
@@ -267,7 +272,7 @@ def test_ai_repairs_uncited_catechism_claim(tmp_path) -> None:
     asyncio.run(async_client.aclose())
 
 
-def test_ai_blocks_uncited_quotation_after_repair_attempt(tmp_path) -> None:
+def test_ai_replaces_uncited_quotation_with_safe_fallback(tmp_path) -> None:
     def upstream(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -295,12 +300,11 @@ def test_ai_blocks_uncited_quotation_after_repair_attempt(tmp_path) -> None:
             json=request_payload(),
         )
 
-    assert response.status_code == 502
-    assert response.json()["error"] == "ungrounded_ai_response"
+    assert_safe_grounding_fallback(response)
     asyncio.run(async_client.aclose())
 
 
-def test_ai_blocks_document_number_not_present_in_cited_source(tmp_path) -> None:
+def test_ai_replaces_unsupported_document_number_with_safe_fallback(tmp_path) -> None:
     def upstream(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -328,12 +332,11 @@ def test_ai_blocks_document_number_not_present_in_cited_source(tmp_path) -> None
             json=request_payload(),
         )
 
-    assert response.status_code == 502
-    assert response.json()["error"] == "ungrounded_ai_response"
+    assert_safe_grounding_fallback(response)
     asyncio.run(async_client.aclose())
 
 
-def test_ai_blocks_low_citation_coverage_after_repair_attempt(tmp_path) -> None:
+def test_ai_replaces_low_citation_coverage_with_safe_fallback(tmp_path) -> None:
     answer = "\n\n".join(
         (
             "Jesus tells a parable that reveals the Father's mercy toward sinners [S1].",
@@ -365,9 +368,18 @@ def test_ai_blocks_low_citation_coverage_after_repair_attempt(tmp_path) -> None:
             json=request_payload(),
         )
 
-    assert response.status_code == 502
-    assert response.json()["error"] == "ungrounded_ai_response"
+    assert_safe_grounding_fallback(response)
     asyncio.run(async_client.aclose())
+
+
+def assert_safe_grounding_fallback(response) -> None:
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"].startswith("I couldn't verify an answer")
+    assert body["citations"] == []
+    assert body["limitations"] == [
+        "Both generated drafts failed source-grounding checks; no unverified answer was returned."
+    ]
 
 
 def test_grounding_accepts_exact_catechism_reference_from_matching_source() -> None:
@@ -395,6 +407,18 @@ def test_grounding_rejects_quote_absent_from_cited_excerpt() -> None:
         answer,
         (source,),
     )
+
+
+def test_grouped_and_full_width_source_markers_are_canonicalized() -> None:
+    result = canonicalize_result_markers(
+        LlmResult(
+            response_id="mistral-response",
+            text="The first claim [S1, S2]. The second claim 【S3】.",
+        )
+    )
+
+    assert result.response_id == "mistral-response"
+    assert result.text == "The first claim [S1] [S2]. The second claim [S3]."
 
 
 def test_chat_completions_adapter_is_swappable_without_android_changes(tmp_path) -> None:
